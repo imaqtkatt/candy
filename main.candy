@@ -1,0 +1,24 @@
+
+(defmacro* defmacro (fun* (name params body)
+  (quasiquote (defmacro* ~name (fun* ~params ~body)))))
+
+(defmacro defun (name params body)
+  (quasiquote (def* ~name (fun* ~params ~body))))
+
+(defun id (x) x)
+
+(defmacro swap (a b)
+  (quasiquote (~b ~a)))
+
+(swap 2 print)
+
+(defmacro when (cond then)
+  (if cond then nil))
+
+(when nil
+  (print "hahaha"))
+
+(progn
+  (print '"oi")
+  (print "teste")
+  'x)
