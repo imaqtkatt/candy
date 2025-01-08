@@ -611,12 +611,21 @@ impl From<Expr> for Value {
       ExprStruct::String(str) => Value::String(str),
       ExprStruct::Number(num) => Value::Number(num),
       ExprStruct::List(list) => Value::List(list.into_iter().map(Value::from).collect()),
-      ExprStruct::Vector(list) => list![
-        symbol!("quote"),
-        Value::List(list.into_iter().map(Value::from).collect())
-      ],
+      ExprStruct::Vector(list) => Value::List(
+        std::iter::once(symbol!("list"))
+          .chain(list.into_iter().map(Value::from))
+          .collect(),
+      ),
     }
   }
+}
+
+macro_rules! assert_length {
+  ($list:expr, $expected:expr, $err:expr) => {
+    if $list.len() != $expected {
+      return Err($err);
+    }
+  };
 }
 
 impl Value {
@@ -631,7 +640,6 @@ impl Value {
   fn list(self) -> Result<Vec<Value>, Value> {
     match self {
       Value::List(list) => Ok(list),
-      Value::Nil => Ok(vec![]),
       _ => Err(list![symbol!("error/is-not-a-list"), self]),
     }
   }
@@ -639,7 +647,6 @@ impl Value {
   fn symbol_list(self) -> Result<Vec<Name>, Value> {
     match self {
       Value::List(list) => list.into_iter().map(|e| e.name()).collect::<Result<_, _>>(),
-      Value::Nil => Ok(vec![]),
       _ => Err(list![symbol!("error/is-not-a-symbol-list"), self]),
     }
   }
@@ -670,6 +677,7 @@ impl Value {
         if let Some((head, tail)) = list.split_first() {
           match head {
             Value::Symbol(ref name) if name == "unquote" => {
+              assert_length!(tail, 1, symbol!("error/invalid-form"));
               return tail.get(0).cloned().ok_or(symbol!("error/expected-expr"));
             }
             _ => Self::splice_unquote(list),
@@ -691,10 +699,12 @@ impl Value {
 
           match head {
             Value::Symbol(ref name) if name == "quote" => {
-              return Ok(tail.get(0).ok_or(symbol!("error/expected-expr"))?.clone());
+              assert_length!(tail, 1, symbol!("error/invalid-form"));
+              return Ok(tail.get(0).cloned().unwrap());
             }
             Value::Symbol(ref name) if name == "quasiquote" => {
-              let expr = tail.get(0).cloned().ok_or(symbol!("error/expected-expr"))?;
+              assert_length!(tail, 1, symbol!("error/invalid-form"));
+              let expr = tail.get(0).cloned().unwrap();
               self = expr.quasiquote()?;
               continue;
             }
@@ -706,92 +716,55 @@ impl Value {
               break Ok(result);
             }
             Value::Symbol(ref name) if name == "print" => {
-              let expr = tail
-                .get(0)
-                .cloned()
-                .ok_or(symbol!("error/expected-expr"))?
-                .eval(env)?;
+              assert_length!(tail, 1, symbol!("error/arity-error"));
+              let expr = tail.get(0).cloned().unwrap().eval(env)?;
               println!("{expr}");
               break Ok(Value::Nil);
             }
             Value::Symbol(ref name) if name == "if" => {
-              let cond = tail.get(0).cloned().ok_or(symbol!("error/expected-expr"))?;
-              let cond_then = tail.get(1).cloned().ok_or(symbol!("error/expected-expr"))?;
-              let cond_else = tail.get(2).cloned().ok_or(symbol!("error/expected-expr"))?;
+              assert_length!(tail, 3, symbol!("error/invalid-form"));
+              let cond = tail.get(0).cloned().unwrap();
+              let cond_then = tail.get(1).cloned().unwrap();
+              let cond_else = tail.get(2).cloned().unwrap();
 
-              let branch = match cond.eval(env)? {
-                Value::Nil => cond_else,
-                _ => cond_then,
+              match cond.eval(env)? {
+                Value::Nil => break cond_else.eval(env),
+                _ => break cond_then.eval(env),
               };
-
-              break branch.eval(env);
             }
             Value::Symbol(ref name) if name == "cons" => {
-              let a = tail
-                .get(0)
-                .cloned()
-                .ok_or(symbol!("error/expected-expr"))?
-                .eval(env)?;
-              let b = tail
-                .get(1)
-                .cloned()
-                .ok_or(symbol!("error/expected-expr"))?
-                .eval(env)?
-                .list()?;
-              let mut a = vec![a];
-              a.extend(b);
-              return Ok(Value::List(a));
+              assert_length!(tail, 2, symbol!("error/arity-error"));
+              let a = tail.get(0).cloned().unwrap().eval(env)?;
+              let b = tail.get(1).cloned().unwrap().eval(env)?.list()?;
+              return Ok(Value::List(std::iter::once(a).chain(b).collect()));
             }
             Value::Symbol(ref name) if name == "list" => {
-              return Ok(Value::List(
-                tail
-                  .iter()
-                  .cloned()
-                  .map(|e| e.eval(env))
-                  .collect::<Result<_, _>>()?,
-              ))
+              return Ok(Value::List(Self::eval_list(tail.to_vec(), env)?))
             }
             Value::Symbol(ref name) if name == "fun*" => {
-              let parameters = tail
-                .get(0)
-                .cloned()
-                .ok_or(symbol!("error/expected-expr"))?
-                .symbol_list()?;
-              let body = tail.get(1).ok_or(symbol!("error/expected-expr"))?.clone();
+              assert_length!(tail, 2, symbol!("error/invalid-form"));
+              let parameters = tail.get(0).cloned().unwrap().symbol_list()?;
+              let body = tail.get(1).cloned().unwrap();
 
-              return Ok(Value::Fun(Fun {
+              break Ok(Value::Fun(Fun {
                 parameters,
                 body: body.into(),
                 env: EnvStruct::from(env),
               }));
             }
             Value::Symbol(ref name) if name == "def*" => {
-              let name = tail
-                .get(0)
-                .cloned()
-                .ok_or(symbol!("error/expected-expr"))?
-                .name()?;
-              let value = tail
-                .get(1)
-                .ok_or(symbol!("error/expected-expr"))?
-                .clone()
-                .eval(env)?;
+              assert_length!(tail, 2, symbol!("error/invalid-form"));
+              let name = tail.get(0).cloned().unwrap().name()?;
+              let value = tail.get(1).cloned().unwrap().eval(env)?;
 
               env.define(name.clone(), value);
 
               return Ok(Value::Symbol(name));
             }
             Value::Symbol(ref name) if name == "defmacro*" => {
-              let name = tail
-                .get(0)
-                .cloned()
-                .ok_or(symbol!("error/expected-expr"))?
-                .name()?;
-              let value = tail
-                .get(1)
-                .ok_or(symbol!("error/expected-expr"))?
-                .clone()
-                .eval(env)?;
+              assert_length!(tail, 2, symbol!("error/invalid-form"));
+              let name = tail.get(0).cloned().unwrap().name()?;
+              let value = tail.get(1).cloned().unwrap().eval(env)?;
 
               if let Value::Fun(fun) = value {
                 env.define(name, Value::Macro(fun));
@@ -800,13 +773,14 @@ impl Value {
                 return Err(symbol!("error/macro-definition-to-non-function"));
               }
             }
+            Value::Symbol(ref name) if name == "macroexpand" => {
+              assert_length!(tail, 1, symbol!("error/arity-error"));
+              let expr = tail.get(0).cloned().unwrap().eval(env)?;
+              return expr.macroexpand(env);
+            }
             _ => match head.clone().eval(env)? {
               Value::Fun(fun) => {
-                let arguments = tail
-                  .iter()
-                  .cloned()
-                  .map(|e| e.eval(env))
-                  .collect::<Result<_, _>>()?;
+                let arguments = Self::eval_list(tail.to_vec(), env)?;
                 return fun.call(arguments);
               }
               _ => break Err(symbol!("error/call-to-non-function")),
@@ -852,18 +826,22 @@ impl Value {
     }
   }
 
+  fn eval_list(list: Vec<Value>, env: &Env) -> Result<Vec<Value>, Value> {
+    list
+      .into_iter()
+      .map(|e| e.eval(env))
+      .collect::<Result<_, _>>()
+  }
+
   pub fn eval(mut self, env: &Env) -> Result<Value, Value> {
     self = self.macroexpand(env)?;
     match self {
-      Value::Symbol(name) => match env.fetch(&name) {
+      Value::Symbol(ref name) => match env.fetch(name) {
         Some(value) => Ok(value),
-        None => Err(list![
-          symbol!("error/undefined-symbol"),
-          Value::Symbol(name)
-        ]),
+        None => Err(list![symbol!("error/undefined-symbol"), self]),
       },
 
-      Value::List(ref list) if list.is_empty() => Ok(Value::Nil),
+      Value::List(ref list) if list.is_empty() => Ok(self),
       Value::List(_) => self.apply(env),
 
       Value::Number(num) => Ok(Value::Number(num)),

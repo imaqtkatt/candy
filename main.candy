@@ -13,7 +13,7 @@
 (swap 2 print)
 
 (defmacro when (cond then)
-  (if cond then nil))
+  (list 'if cond then nil))
 
 (when nil
   (print "hahaha"))
@@ -22,3 +22,5 @@
   (print '"oi")
   (print "teste")
   'x)
+
+(print (macroexpand '(when nil 2)))
